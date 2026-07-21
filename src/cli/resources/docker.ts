@@ -19,12 +19,7 @@
  */
 import { registerResource } from '../crud.js';
 import type { CallerContext } from '../frame.js';
-import {
-  READ_ONLY_VERBS,
-  resolveService,
-  visibleServices,
-  type DockerVerb,
-} from '../../modules/docker-ops/allowlist.js';
+import { resolveService, visibleServices, type DockerVerb } from '../../modules/docker-ops/allowlist.js';
 import {
   LOG_LINES_DEFAULT,
   LOG_LINES_MAX,
@@ -52,7 +47,8 @@ async function runVerb(verb: DockerVerb, args: Record<string, unknown>, ctx: Cal
 
 function formatRun(data: unknown): string {
   const r = data as DockerRunResult;
-  const header = `${r.verb} ${r.service}${r.timedOut ? ' (TIMED OUT)' : ''}`;
+  const tag = r.timedOut ? ' (TIMED OUT)' : r.inconclusive ? ' (RESULT UNKNOWN)' : '';
+  const header = `${r.verb} ${r.service}${tag}`;
   return `${header}\n${'-'.repeat(header.length)}\n${r.output || '(no output)'}`;
 }
 
@@ -156,7 +152,3 @@ registerResource({
     },
   },
 });
-
-// Re-exported so the registration and the read/mutate split can be asserted
-// together in tests.
-export { READ_ONLY_VERBS };
