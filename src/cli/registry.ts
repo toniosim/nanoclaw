@@ -16,8 +16,12 @@ import type { CallerContext } from './frame.js';
  * Resources an agent under `cli_scope=group` may touch. Single source —
  * consumed by both dispatch enforcement and `ncl help` filtering, so the
  * agent is never shown a resource the gate would reject (or vice versa).
+ *
+ * `docker` is bounded differently from the rest: it owns no DB rows, so its
+ * scope comes from the host allowlist's per-entry `agentGroups` (enforced in
+ * the handlers), not from post-handler row filtering.
  */
-export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
+export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks', 'docker']);
 
 export type Access = 'open' | 'approval' | 'hidden';
 
