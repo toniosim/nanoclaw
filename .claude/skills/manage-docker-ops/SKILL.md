@@ -46,11 +46,20 @@ Recommend the narrowest set that does the job:
 - The operator's own applications they want the agent iterating on: add `"redeploy"`
   (`compose up -d --build`).
 
-Write the file, creating the directory if needed:
+**Adding to an existing file is a read-modify-write, never an overwrite.** Read the file
+with the Read tool, append the new entry to the `services` array in memory, then Write the
+complete list back. Do not pipe or redirect into the file — a shell redirect truncates it
+and silently drops every service already configured.
+
+If the file does not exist yet, create it with just the entries you're adding:
 
 ```bash
 mkdir -p ~/.config/nanoclaw
-cat > ~/.config/nanoclaw/docker-allowlist.json <<'EOF'
+```
+
+An entry looks like this (this is the shape to build, not a command to run):
+
+```json
 {
   "services": [
     {
@@ -68,11 +77,28 @@ cat > ~/.config/nanoclaw/docker-allowlist.json <<'EOF'
     }
   ]
 }
-EOF
 ```
 
-Preserve existing entries — read the file first and write back the full list, never just
-the new entry.
+After writing, run `ncl docker list` and confirm **every** previously configured service is
+still listed alongside the new one. If one vanished, the file was overwritten rather than
+extended — restore it before continuing.
+
+`agentGroups` is optional and, when present, must be an array of agent group IDs. A
+malformed value (a bare string, a non-string element) drops the whole entry rather than
+sharing it with every agent group — check `ncl docker list` after editing it.
+
+## Compose Driver
+
+By default these verbs run `docker compose`. If the operator drives their own services
+with something else, set a top-level `binary` alongside `services` (bare command name,
+resolved via PATH):
+
+```json
+{ "binary": "podman", "services": [] }
+```
+
+This is independent of the runtime NanoClaw uses for agent containers — changing one does
+not affect the other. An invalid value falls back to `docker` with a warning in the log.
 
 ## Remove a Service
 

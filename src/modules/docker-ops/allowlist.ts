@@ -14,8 +14,14 @@
  *   - WHICH verbs each project permits (`allow`), optionally narrowed to
  *     specific agent groups (`agentGroups`).
  *
+ * Validation fails closed throughout: a malformed entry is dropped (so the
+ * service is simply unknown) rather than normalized into something broader
+ * than the operator wrote. `agentGroups` in particular can only be absent or
+ * a valid list — a malformed value never degrades to "any group".
+ *
  * Shape:
  *   {
+ *     "binary": "docker",          // optional; compose driver, defaults to docker
  *     "services": [
  *       {
  *         "name": "sonarr",
@@ -38,9 +44,6 @@ import { log } from '../../log.js';
 export const DOCKER_VERBS = ['status', 'logs', 'restart', 'update', 'redeploy'] as const;
 export type DockerVerb = (typeof DOCKER_VERBS)[number];
 
-/** Verbs that only read. The rest mutate and register as `access: 'approval'`. */
-export const READ_ONLY_VERBS: ReadonlySet<DockerVerb> = new Set<DockerVerb>(['status', 'logs']);
-
 export interface DockerService {
   name: string;
   composeFile: string;
@@ -54,7 +57,20 @@ export interface DockerService {
 
 export interface DockerAllowlist {
   services: DockerService[];
+  /**
+   * Binary used to drive the operator's own compose projects. Deliberately
+   * separate from `CONTAINER_RUNTIME_BIN`, which is the runtime that spawns
+   * *agent* containers — the two are unrelated roles and a host can run
+   * different tooling for each. Bare command name only (resolved via PATH).
+   */
+  binary: string;
 }
+
+/** Compose driver when the allowlist doesn't name one. */
+export const DEFAULT_COMPOSE_BINARY = 'docker';
+
+/** Bare command name — no path separators, no flags, no shell metacharacters. */
+const BINARY_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 // Cache the last successfully-parsed allowlist, keyed on path + mtime — an
 // edited file is picked up without a host restart, and a parse error is never
@@ -102,10 +118,22 @@ function normalizeService(raw: unknown): DockerService | null {
   }
 
   const service = typeof entry.service === 'string' && entry.service ? entry.service : name;
-  const agentGroups =
-    Array.isArray(entry.agentGroups) && entry.agentGroups.every((g) => typeof g === 'string')
-      ? (entry.agentGroups as string[])
-      : undefined;
+
+  // `agentGroups` narrows an entry to specific groups, so a malformed value
+  // must never degrade to "shared with everyone" — that would silently widen
+  // the entry the operator was trying to restrict. Absent is the only way to
+  // mean "any group"; present-but-malformed drops the entry.
+  let agentGroups: string[] | undefined;
+  if (entry.agentGroups !== undefined) {
+    if (!Array.isArray(entry.agentGroups) || !entry.agentGroups.every((g) => typeof g === 'string' && g)) {
+      log.warn(
+        'Docker allowlist: "agentGroups" must be an array of non-empty strings — skipping entry rather than sharing it with every agent group',
+        { name },
+      );
+      return null;
+    }
+    agentGroups = entry.agentGroups as string[];
+  }
 
   return {
     name,
@@ -128,7 +156,7 @@ export function loadDockerAllowlist(): DockerAllowlist {
   try {
     stat = fs.statSync(file);
   } catch {
-    return { services: [] };
+    return { services: [], binary: DEFAULT_COMPOSE_BINARY };
   }
 
   if (cache && cache.path === file && cache.mtimeMs === stat.mtimeMs) {
@@ -143,13 +171,22 @@ export function loadDockerAllowlist(): DockerAllowlist {
       file,
       err: e instanceof Error ? e.message : String(e),
     });
-    return { services: [] };
+    return { services: [], binary: DEFAULT_COMPOSE_BINARY };
   }
 
-  const rawServices =
-    typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as Record<string, unknown>).services)
-      ? ((parsed as Record<string, unknown>).services as unknown[])
-      : [];
+  const root = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  const rawServices = Array.isArray(root.services) ? (root.services as unknown[]) : [];
+
+  let binary = DEFAULT_COMPOSE_BINARY;
+  if (root.binary !== undefined) {
+    if (typeof root.binary === 'string' && BINARY_RE.test(root.binary)) {
+      binary = root.binary;
+    } else {
+      log.warn(`Docker allowlist: invalid "binary" — falling back to "${DEFAULT_COMPOSE_BINARY}"`, {
+        binary: root.binary,
+      });
+    }
+  }
 
   const services: DockerService[] = [];
   const seen = new Set<string>();
@@ -164,7 +201,7 @@ export function loadDockerAllowlist(): DockerAllowlist {
     services.push(svc);
   }
 
-  const allowlist = { services };
+  const allowlist = { services, binary };
   cache = { path: file, mtimeMs: stat.mtimeMs, allowlist };
   return allowlist;
 }

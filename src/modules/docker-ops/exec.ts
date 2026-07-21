@@ -11,15 +11,16 @@
  *
  * `-f <composeFile>` always comes from the allowlist entry, never the caller,
  * which is what keeps "act on an allowlisted project" from widening into "act
- * on any compose file on the host".
+ * on any compose file on the host". Every verb also targets the entry's own
+ * `service`, so allowlisting one service out of a multi-service file does not
+ * expose or act on its neighbours.
  */
 import { execFile } from 'child_process';
 import path from 'path';
 import { promisify } from 'util';
 
-import { CONTAINER_RUNTIME_BIN } from '../../container-runtime.js';
 import { log } from '../../log.js';
-import type { DockerService, DockerVerb } from './allowlist.js';
+import { loadDockerAllowlist, type DockerService, type DockerVerb } from './allowlist.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -32,8 +33,12 @@ const TIMEOUTS: Record<DockerVerb, number> = {
   redeploy: 900_000,
 };
 
-/** Cap on captured output, per stream and in the returned text. */
-const MAX_BUFFER = 4 * 1024 * 1024;
+/**
+ * Cap on captured output. Generous because overflow is not a clean failure:
+ * the command has already run by the time the buffer fills, so a low cap turns
+ * successful builds into unreportable ones (see the ENOBUFS branch below).
+ */
+const MAX_BUFFER = 32 * 1024 * 1024;
 const MAX_OUTPUT_CHARS = 16_000;
 
 export const LOG_LINES_DEFAULT = 100;
@@ -46,6 +51,11 @@ export interface DockerRunResult {
   commands: string[];
   output: string;
   timedOut?: boolean;
+  /**
+   * The command ran but its result could not be determined (output overflowed
+   * the capture buffer). NOT a failure — callers must not present it as one.
+   */
+  inconclusive?: boolean;
 }
 
 /** Keep the tail — the end of a build or log stream is the informative part. */
@@ -54,18 +64,28 @@ function clampOutput(text: string): string {
   return `[...truncated ${text.length - MAX_OUTPUT_CHARS} chars...]\n${text.slice(-MAX_OUTPUT_CHARS)}`;
 }
 
+/** The compose driver for the operator's own services (allowlist-configured). */
+export function composeBinary(): string {
+  return loadDockerAllowlist().binary;
+}
+
 /**
- * The argv (after the runtime binary) for each verb. `update` is two steps:
+ * The argv (after the compose binary) for each verb. `update` is two steps:
  * pull the tags the compose file already pins, then recreate. The caller
  * cannot influence which image is pulled — that is whatever the operator
  * wrote in the compose file.
+ *
+ * Exported for tests: these argv shapes are the security surface, so they are
+ * asserted directly rather than through a mocked child process.
  */
-function argvFor(verb: DockerVerb, svc: DockerService, opts: { lines?: number }): string[][] {
+export function buildArgv(verb: DockerVerb, svc: DockerService, opts: { lines?: number } = {}): string[][] {
   const base = ['compose', '-f', svc.composeFile];
   const target = svc.service;
   switch (verb) {
     case 'status':
-      return [[...base, 'ps']];
+      // Targeted: a bare `ps` would report every service in the compose file,
+      // including ones the operator never allowlisted.
+      return [[...base, 'ps', target]];
     case 'logs': {
       const lines = Math.min(Math.max(Math.trunc(opts.lines ?? LOG_LINES_DEFAULT), 1), LOG_LINES_MAX);
       return [[...base, 'logs', '--no-color', '--tail', String(lines), target]];
@@ -92,27 +112,48 @@ export async function runDockerVerb(
   svc: DockerService,
   opts: { lines?: number } = {},
 ): Promise<DockerRunResult> {
-  const sequences = argvFor(verb, svc, opts);
+  const sequences = buildArgv(verb, svc, opts);
+  const bin = composeBinary();
   const cwd = path.dirname(svc.composeFile);
   const chunks: string[] = [];
   const commands: string[] = [];
 
   for (const argv of sequences) {
-    const rendered = `${CONTAINER_RUNTIME_BIN} ${argv.join(' ')}`;
+    const rendered = `${bin} ${argv.join(' ')}`;
     commands.push(rendered);
     log.info('docker-ops: executing', { service: svc.name, verb, command: rendered });
     try {
-      const { stdout, stderr } = await execFileAsync(CONTAINER_RUNTIME_BIN, argv, {
+      const { stdout, stderr } = await execFileAsync(bin, argv, {
         cwd,
         timeout: TIMEOUTS[verb],
         maxBuffer: MAX_BUFFER,
-        // Compose writes progress to stderr; both streams are part of the answer.
-        env: { ...process.env, COMPOSE_PROGRESS: 'plain' },
       });
       chunks.push([stdout, stderr].filter(Boolean).join('\n').trim());
     } catch (e) {
       const err = e as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean };
       const detail = [err.stdout, err.stderr].filter(Boolean).join('\n').trim() || err.message;
+
+      // Buffer overflow is not an exit code — the command ran to completion (or
+      // is running still) and we simply stopped capturing. Reporting it as a
+      // failure would tell the user a deploy failed when it succeeded.
+      if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        log.warn('docker-ops: output exceeded capture buffer — result unknown', {
+          service: svc.name,
+          verb,
+          command: rendered,
+        });
+        return {
+          service: svc.name,
+          verb,
+          commands,
+          inconclusive: true,
+          output: clampOutput(
+            `${rendered} produced more output than could be captured, so its result is UNKNOWN — it may well have succeeded. ` +
+              `Do not report this as a failure; check \`ncl docker status --name ${svc.name}\` to see the actual state.\n\n${detail}`,
+          ),
+        };
+      }
+
       chunks.push(detail);
       log.error('docker-ops: command failed', { service: svc.name, verb, command: rendered, err: err.message });
       // Stop the sequence — `up -d` after a failed `pull` would silently

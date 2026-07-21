@@ -71,6 +71,43 @@ describe('loadDockerAllowlist', () => {
     expect(loadDockerAllowlist().services).toEqual([]);
   });
 
+  // A malformed narrowing field must never widen the entry — the failure mode
+  // that matters is "restricted entry silently becomes visible to everyone".
+  it.each([
+    ['a bare string instead of an array', 'group-a'],
+    ['an array with a non-string element', ['group-a', 123]],
+    ['an array with an empty string', ['group-a', '']],
+    ['an object', { 0: 'group-a' }],
+  ])('drops an entry whose agentGroups is %s', (_label, agentGroups) => {
+    writeAllowlist({ services: [{ name: 'scoped', composeFile, allow: ['status'], agentGroups }] });
+    expect(loadDockerAllowlist().services).toEqual([]);
+    // ...and specifically is not visible to an unrelated agent group.
+    expect(visibleServices('group-b')).toEqual([]);
+  });
+
+  it('treats an absent agentGroups as shared with any group', () => {
+    writeAllowlist({ services: [{ name: 'shared', composeFile, allow: ['status'] }] });
+    expect(visibleServices('any-group').map((s) => s.name)).toEqual(['shared']);
+  });
+
+  it('defaults the compose binary to docker', () => {
+    writeAllowlist({ services: [] });
+    expect(loadDockerAllowlist().binary).toBe('docker');
+  });
+
+  it('honors a configured compose binary', () => {
+    writeAllowlist({ binary: 'podman', services: [] });
+    expect(loadDockerAllowlist().binary).toBe('podman');
+  });
+
+  it.each([['docker compose'], ['/usr/bin/docker'], ['docker; rm -rf /'], ['']])(
+    'falls back to docker for the invalid binary %j',
+    (binary) => {
+      writeAllowlist({ binary, services: [] });
+      expect(loadDockerAllowlist().binary).toBe('docker');
+    },
+  );
+
   it('fails closed on a parse error rather than serving a stale list', () => {
     writeAllowlist({ services: [{ name: 'sonarr', composeFile, allow: ['status'] }] });
     expect(loadDockerAllowlist().services).toHaveLength(1);
