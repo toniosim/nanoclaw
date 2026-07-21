@@ -53,6 +53,11 @@ const HOME_DIR = process.env.HOME || os.homedir();
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
+// Docker ops: the set of compose projects an agent may act on, and which verbs
+// are permitted per project. Same boundary rule as the mount allowlist — it
+// lives outside the project root and is never mounted into a container, so an
+// agent has no write path to the list that bounds it.
+export const DOCKER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'docker-allowlist.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
