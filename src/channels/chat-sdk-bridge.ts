@@ -118,6 +118,30 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Parse a raw Discord component `custom_id` back into `{ questionId, tail }`.
+ *
+ * We encode card buttons as `ncq:<questionId>:<idx>` with a separate button
+ * `value` of `<idx>`. The Discord adapter's `encodeDiscordCustomId` appends
+ * that value after a newline delimiter, so the custom_id Discord actually
+ * stores — and echoes back on the raw Gateway interaction — is
+ * `ncq:<questionId>:<idx>\n<idx>`.
+ *
+ * The adapter's own `onAction` decode strips the `\n<value>` suffix, but the
+ * Gateway-interaction path below reads the raw custom_id, so it must strip it
+ * too. Without this, `tail` becomes `"<idx>\n<idx>"`, fails the integer decode
+ * in `resolveSelectedOption`, and every click resolves to a non-'approve'
+ * value — i.e. every approval card silently reads as a reject.
+ */
+export function parseNcqCustomId(customId: string | undefined): { questionId: string; tail: string } | undefined {
+  if (!customId) return undefined;
+  const logicalId = customId.split('\n', 1)[0]; // drop the adapter's `\n<value>` suffix
+  if (!logicalId.startsWith('ncq:')) return undefined;
+  const colonIdx = logicalId.indexOf(':', 4); // after "ncq:"
+  if (colonIdx === -1) return undefined;
+  return { questionId: logicalId.slice(4, colonIdx), tail: logicalId.slice(colonIdx + 1) };
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -660,16 +684,12 @@ async function handleForwardedEvent(
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
 
-      // Parse the selected option from custom_id
-      let questionId: string | undefined;
-      let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
-        if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
-        }
-      }
+      // Parse the selected option from custom_id. The adapter appends the
+      // button value after a `\n` delimiter, so parse the logical id only —
+      // see parseNcqCustomId.
+      const parsed = parseNcqCustomId(customId);
+      const questionId = parsed?.questionId;
+      const tail = parsed?.tail;
 
       // Update the card to show the selected answer and remove buttons
       const originalEmbeds =
