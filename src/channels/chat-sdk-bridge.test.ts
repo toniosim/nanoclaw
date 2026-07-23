@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, parseNcqCustomId, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -51,6 +51,29 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('parseNcqCustomId', () => {
+  // The Discord adapter appends the button `value` after a `\n` delimiter, so
+  // the raw Gateway custom_id for a card button we encode as `ncq:<qid>:<idx>`
+  // (with value `<idx>`) arrives as `ncq:<qid>:<idx>\n<idx>`. The tail must
+  // come back as the bare index — otherwise the integer decode fails and the
+  // click silently resolves to a reject.
+  it('strips the adapter’s newline-suffixed value so the tail is a bare index', () => {
+    expect(parseNcqCustomId('ncq:appr-123-abc:0\n0')).toEqual({ questionId: 'appr-123-abc', tail: '0' });
+    expect(parseNcqCustomId('ncq:appr-123-abc:2\n2')).toEqual({ questionId: 'appr-123-abc', tail: '2' });
+  });
+
+  it('parses a custom_id with no adapter suffix (other adapters / legacy)', () => {
+    expect(parseNcqCustomId('ncq:appr-123-abc:1')).toEqual({ questionId: 'appr-123-abc', tail: '1' });
+  });
+
+  it('returns undefined for non-ncq or malformed ids', () => {
+    expect(parseNcqCustomId(undefined)).toBeUndefined();
+    expect(parseNcqCustomId('')).toBeUndefined();
+    expect(parseNcqCustomId('other:foo:0')).toBeUndefined();
+    expect(parseNcqCustomId('ncq:no-tail')).toBeUndefined();
   });
 });
 
