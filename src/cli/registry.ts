@@ -21,7 +21,15 @@ import type { CallerContext } from './frame.js';
  * scope comes from the host allowlist's per-entry `agentGroups` (enforced in
  * the handlers), not from post-handler row filtering.
  */
-export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks', 'docker']);
+export const GROUP_SCOPE_RESOURCES = new Set([
+  'groups',
+  'sessions',
+  'destinations',
+  'members',
+  'tasks',
+  'templates',
+  'docker',
+]);
 
 export type Access = 'open' | 'approval' | 'hidden';
 

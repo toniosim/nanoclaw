@@ -10,6 +10,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
+import { sessionMountPolicy } from '../../drivers/index.js';
+import { GROUP_FOLDER_LABEL, requiredMountClass, type MountClass } from '../../drivers/types.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -36,7 +39,21 @@ export interface AllowedRoot {
 let cache: { path: string; mtimeMs: number; allowlist: MountAllowlist } | null = null;
 
 /**
- * Default blocked patterns - paths that should never be mounted
+ * Default blocked patterns - paths that should never be mounted.
+ *
+ * Entries are matched by {@link matchesBlockedPattern} as substrings of the
+ * mount's resolved realPath, so an entry may carry a separator
+ * (`.config/nanoclaw`) to pin a name to its parent instead of blocking every
+ * `.config` on the host.
+ *
+ * SCOPE — read this before treating the list as protection. The check runs
+ * exactly once, against the realPath of the mount ROOT (`validateMount`
+ * below), and does NOT descend. It stops an operator from *naming* one of
+ * these paths as a mount; it does nothing about what lives underneath an
+ * allowed root. Allowlist `~` (or `~/.config`) and every credential below it
+ * is mounted regardless of what this list says. That is a structural property
+ * of a root-only check — closing it would need a walk of the mounted subtree,
+ * which nothing here does. Do not read an entry here as "this file is safe."
  */
 const DEFAULT_BLOCKED_PATTERNS = [
   '.ssh',
@@ -47,6 +64,20 @@ const DEFAULT_BLOCKED_PATTERNS = [
   '.gcloud',
   '.kube',
   '.docker',
+  // NanoClaw's own host-side state. The mount allowlist itself lives at
+  // ~/.config/nanoclaw/mount-allowlist.json specifically so a container agent
+  // cannot edit the rules that govern it (see the module header) — handing that
+  // directory to a container as a mount root would undo the whole arrangement.
+  // It is also where host credentials land as they are added.
+  '.config/nanoclaw',
+  // Host-executed helper binaries. Setup may install gateway/provider CLIs here and
+  // then invokes them by name as the operator, so a read-write mount of this
+  // directory is a container-to-host code-execution primitive: drop a file,
+  // wait for the host to run it.
+  '.local/bin',
+  // The local OneCLI gateway's stack: its .env holds the database password, and
+  // the operator runs `docker compose` on the compose file beside it.
+  '.onecli',
   'credentials',
   '.env',
   '.netrc',
@@ -193,7 +224,26 @@ function getRealPath(p: string): string | null {
 }
 
 /**
- * Check if a path matches any blocked pattern
+ * The class the session driver reserves for this path in this group, or null.
+ * The guard's own rule, judged on the path this module resolves, so add-mount
+ * can refuse what every start of the group would.
+ */
+export async function reservedMountClass(agentGroupId: string, hostPath: string): Promise<MountClass | null> {
+  const group = await getAgentGroup(agentGroupId);
+  const labels: Record<string, string> = group ? { [GROUP_FOLDER_LABEL]: group.folder } : {};
+  const expanded = expandPath(hostPath);
+  return requiredMountClass(getRealPath(expanded) ?? expanded, { labels }, sessionMountPolicy());
+}
+
+/**
+ * Check if a path matches any blocked pattern.
+ *
+ * Substring match, both per path component and against the whole realPath —
+ * so `.env` also rejects `.envrc`, and a pattern may span a separator.
+ *
+ * Its only caller passes the realPath of the mount ROOT, so this answers
+ * "may this path be named as a mount?" and never "is anything blocked inside
+ * it?". See the note on {@link DEFAULT_BLOCKED_PATTERNS}.
  */
 function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): string | null {
   const pathParts = realPath.split(path.sep);
@@ -403,37 +453,4 @@ export function validateAdditionalMounts(
   }
 
   return validatedMounts;
-}
-
-/**
- * Generate a template allowlist file for users to customize
- */
-export function generateAllowlistTemplate(): string {
-  const template: MountAllowlist = {
-    allowedRoots: [
-      {
-        path: '~/projects',
-        allowReadWrite: true,
-        description: 'Development projects',
-      },
-      {
-        path: '~/repos',
-        allowReadWrite: true,
-        description: 'Git repositories',
-      },
-      {
-        path: '~/Documents/work',
-        allowReadWrite: false,
-        description: 'Work documents (read-only)',
-      },
-    ],
-    blockedPatterns: [
-      // Additional patterns beyond defaults
-      'password',
-      'secret',
-      'token',
-    ],
-  };
-
-  return JSON.stringify(template, null, 2);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -44,8 +44,25 @@ describe('cli-tools manifest', () => {
 
   it('keeps the baseline CLIs the agent depends on', () => {
     const names = manifest.map((t) => t.name);
-    for (const required of ['vercel', 'agent-browser', '@anthropic-ai/claude-code']) {
+    // Only what the agent cannot function without: a browser it drives, and the
+    // provider CLI it runs. Everything else is opt-in — a tool nobody asked for
+    // is bytes in every image, on every machine, for everyone.
+    for (const required of ['agent-browser', '@anthropic-ai/claude-code']) {
       expect(names).toContain(required);
+    }
+  });
+
+  it('bakes in nothing that a skill is meant to add on request', () => {
+    // Regression guard for the opt-in boundary. `vercel` comes only from
+    // /add-vercel, which also adds container/skills/vercel-cli/; trunk ships
+    // neither. An entry without that skill means it was baked in again. Trunk
+    // adding both would pass here on purpose: that is a new skill review sees.
+    const names = manifest.map((t) => t.name);
+    if (names.includes('vercel')) {
+      expect(
+        existsSync(join(here, 'skills', 'vercel-cli', 'SKILL.md')),
+        'vercel is opt-in: only /add-vercel adds it, together with container/skills/vercel-cli/',
+      ).toBe(true);
     }
   });
 
